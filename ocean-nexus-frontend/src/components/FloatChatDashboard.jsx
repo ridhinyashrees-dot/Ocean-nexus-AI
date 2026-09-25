@@ -204,8 +204,9 @@ export default function FloatChatDashboard({ onBack }) {
   if (showWebGLDashboard) {
   return (
     <MapDashboard
-      onBack={() => setShowWebGLDashboard(false)}
-    />
+  payload={activePayload}
+  onBack={() => setShowWebGLDashboard(false)}
+/>
   );
 }
 
@@ -409,7 +410,9 @@ export default function FloatChatDashboard({ onBack }) {
               <div>
                 <span className="text-[11px] text-slate-400 uppercase font-semibold tracking-wider">Avg Surface Temp</span>
                 <h3 className="text-xl font-bold text-slate-100">
-                  {activePoint?.temp ? `${activePoint.temp} °C` : (primaryPayload?.surface_temp || '28.5 °C')}
+                  {primaryPayload?.surface_temp
+  ? `${primaryPayload.surface_temp} °C`
+  : 'N/A'}
                 </h3>
               </div>
               <Thermometer className="w-7 h-7 text-cyan-400 opacity-80 drop-shadow-[0_0_15px_rgba(6,182,212,0.15)]" />

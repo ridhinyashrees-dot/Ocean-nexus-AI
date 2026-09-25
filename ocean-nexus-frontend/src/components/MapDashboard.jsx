@@ -25,7 +25,7 @@ import {
 } from 'lucide-react';
 import axios from 'axios';
 
-const MapDashboard = ({ onBack }) => {
+const MapDashboard = ({ onBack,payload }) => {
   const [selectedFloat, setSelectedFloat] = useState(null);
   const [hoverInfo, setHoverInfo] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -51,49 +51,8 @@ const MapDashboard = ({ onBack }) => {
       ]
     }
   */
-  useEffect(() => {
-    let isMounted = true; // Prevent state update on unmounted component
-    const fetchArgoData = async () => {
-      try {
-        setLoading(true);
-        const response = await axios.get(
-          'http://127.0.0.1:8000/api/v1/argo-floats' // Change this to a dedicated endpoint
-        );
-
-        if (!isMounted) return;
-
-        const payload = response.data?.dashboard_payload || response.data;
-        const payloadArray = Array.isArray(payload) ? payload : [payload];
-
-        const formattedFloats = payloadArray
-          .map((item, index) => ({
-            id: item.float_id || `ARGO-FLOAT-${index + 1}`,
-            title: item.title || 'ARGO Float',
-            region: item.region || 'Ocean Region',
-            trajectory_4d: item.trajectory_4d || []
-          }))
-          .filter(float => float.trajectory_4d.length > 0);
-
-        setArgoFloats(formattedFloats);
-      } catch (error) {
-        console.error('Unable to load ARGO data:', error);
-      } finally {
-        if (isMounted) setLoading(false);
-      }
-    };
-
-    fetchArgoData();
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
-  /*
-    Normalize all trajectory records.
-    Supports both:
-    lat/lng and latitude/longitude
-    temp and temperature
-  */
+  
+   
   const normalizedFloats = useMemo(() => {
     return argoFloats.map(float => {
       const trajectory = float.trajectory_4d
@@ -107,7 +66,7 @@ const MapDashboard = ({ onBack }) => {
             point.lon
           ),
 
-          depth: Number(point.depth ?? 0),
+          depth: Number(point.depth ?? point.pressure ?? 0),
 
           temp: Number(
             point.temp ??
