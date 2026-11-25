@@ -23,12 +23,26 @@ import {
   Droplets,
   MapPin
 } from 'lucide-react';
-import axios from 'axios';
+
+const demoFloats = [
+  {
+    id: 'ARGO-6903059',
+    title: 'ARGO Float 6903059',
+    region: 'Bay of Bengal',
+    trajectory_4d: [
+      { lat: 13.2, lng: 82.4, depth: 0, temp: 28.5, salinity: 33.8, time: '2024-01-15T00:00:00Z' },
+      { lat: 13.0, lng: 82.7, depth: 200, temp: 25.8, salinity: 34.2, time: '2024-03-15T00:00:00Z' },
+      { lat: 12.8, lng: 83.0, depth: 500, temp: 20.4, salinity: 34.7, time: '2024-06-15T00:00:00Z' },
+      { lat: 12.5, lng: 83.4, depth: 1000, temp: 15.2, salinity: 35.0, time: '2024-09-15T00:00:00Z' },
+      { lat: 12.2, lng: 83.8, depth: 1500, temp: 11.8, salinity: 35.1, time: '2024-12-15T00:00:00Z' }
+    ]
+  }
+];
 
 const MapDashboard = ({ onBack,payload }) => {
   const [selectedFloat, setSelectedFloat] = useState(null);
   const [hoverInfo, setHoverInfo] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
 
   // Time animation states
   const [timeIndex, setTimeIndex] = useState(0);
@@ -37,7 +51,18 @@ const MapDashboard = ({ onBack,payload }) => {
   // Depth exaggeration
   const [depthScale, setDepthScale] = useState(3);
 
-  const [argoFloats, setArgoFloats] = useState([]);
+  const sourceFloats = useMemo(() => {
+    const queryFloats = (Array.isArray(payload) ? payload : payload ? [payload] : [])
+      .filter(float => float && typeof float === 'object')
+      .map((float, index) => ({
+        ...float,
+        id: float.float_id || `ARGO-QUERY-${index + 1}`,
+        title: float.title || `ARGO Float ${float.float_id || index + 1}`,
+        trajectory_4d: Array.isArray(float.trajectory_4d) ? float.trajectory_4d : []
+      }));
+
+    return queryFloats.length > 0 ? queryFloats : (payload ? [] : demoFloats);
+  }, [payload]);
 
   /*
     Fetch ARGO data from backend.
@@ -54,36 +79,28 @@ const MapDashboard = ({ onBack,payload }) => {
   
    
   const normalizedFloats = useMemo(() => {
-    return argoFloats.map(float => {
+    return sourceFloats.map(float => {
       const trajectory = float.trajectory_4d
-        .map((point, index) => ({
-          id: `${float.id}-${index}`,
+        .map((point, index) => {
+          const latitude = point?.lat ?? point?.latitude;
+          const longitude = point?.lng ?? point?.longitude ?? point?.lon;
 
-          lat: Number(point.lat ?? point.latitude),
-          lng: Number(
-            point.lng ??
-            point.longitude ??
-            point.lon
-          ),
+          return {
+            id: `${float.id}-${index}`,
 
-          depth: Number(point.depth ?? point.pressure ?? 0),
+            lat: latitude == null ? NaN : Number(latitude),
+            lng: longitude == null ? NaN : Number(longitude),
 
-          temp: Number(
-            point.temp ??
-            point.temperature ??
-            0
-          ),
+            depth: Number(point?.depth ?? point?.pressure ?? 0),
+            temp: Number(point?.temp ?? point?.temperature ?? 0),
+            salinity: Number(point?.salinity ?? point?.psu ?? 0),
 
-          salinity: Number(
-            point.salinity ??
-            point.psu ??
-            0
-          ),
-
-          time: point.time || point.timestamp || ''
-        }))
+            time: point?.time || point?.timestamp || ''
+          };
+        })
         .filter(
           point =>
+            point &&
             Number.isFinite(point.lat) &&
             Number.isFinite(point.lng)
         )
@@ -106,7 +123,7 @@ const MapDashboard = ({ onBack,payload }) => {
         trajectory
       };
     });
-  }, [argoFloats]);
+  }, [sourceFloats]);
 
   /*
     Find the largest number of observations.
@@ -249,7 +266,8 @@ const MapDashboard = ({ onBack,payload }) => {
   useEffect(() => {
     setTimeIndex(0);
     setIsPlaying(false);
-  }, [normalizedFloats.length]);
+    setSelectedFloat(null);
+  }, [normalizedFloats]);
 
   /*
     Selected observation.
@@ -271,11 +289,11 @@ const MapDashboard = ({ onBack,payload }) => {
     DeckGL camera.
   */
   const initialViewState = {
-    longitude: 78.0,
-    latitude: 12.0,
-    zoom: 5,
-    pitch: 55,
-    bearing: -20
+    longitude: activePoint?.lng ?? 82.8,
+    latitude: activePoint?.lat ?? 13.0,
+    zoom: 5.5,
+    pitch: 0,
+    bearing: 0
   };
 
   /*
@@ -417,7 +435,9 @@ const MapDashboard = ({ onBack,payload }) => {
         doubleClickZoom: true
       }}
                 layers={layers}
-                views={new MapView({ repeat: true })}
+                views={new MapView({
+  repeat: false
+})}
               />
 
               {/* HOVER TOOLTIP */}

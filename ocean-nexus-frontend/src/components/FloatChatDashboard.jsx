@@ -22,6 +22,24 @@ L.Icon.Default.mergeOptions({
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend);
 
+const normalizeTrajectory = (payload) => {
+  const trajectory = payload?.trajectory_4d ?? payload?.trajectory ?? [];
+
+  if (!Array.isArray(trajectory)) return [];
+
+  return trajectory
+    .filter(point => point && typeof point === 'object')
+    .map(point => ({
+      ...point,
+      lat: Number(point.lat ?? point.latitude),
+      lng: Number(point.lng ?? point.longitude ?? point.lon),
+      depth: Number(point.depth ?? point.pressure),
+      temp: Number(point.temp ?? point.temperature),
+      salinity: Number(point.salinity ?? point.psu)
+    }))
+    .filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lng));
+};
+
 export default function FloatChatDashboard({ onBack }) {
   const [activeTab, setActiveTab] = useState('chat');
   const [messages, setMessages] = useState([
@@ -52,20 +70,24 @@ export default function FloatChatDashboard({ onBack }) {
     try {
       const res = await axios.get(`http://127.0.0.1:8000/api/v1/chat?q=${encodeURIComponent(q)}`);
       const data = res.data;
+      const hasDashboardPayload = Array.isArray(data.dashboard_payload)
+        ? data.dashboard_payload.length > 0
+        : Boolean(data.dashboard_payload);
 
       setMessages(prev => [
         ...prev,
         {
           sender: 'ai',
           text: data.chat_response || 'Data query processed successfully.',
-          payload: data.dashboard_payload || null,
+          payload: hasDashboardPayload ? data.dashboard_payload : null,
           sql: data.generated_sql || ''
         }
       ]);
 
-      if (data.dashboard_payload) {
+      if (hasDashboardPayload) {
         setActivePayload(data.dashboard_payload);
         setGeneratedSql(data.generated_sql || '');
+        setShowWebGLDashboard(true);
       }
     } catch (err) {
       setMessages(prev => [
@@ -100,15 +122,21 @@ export default function FloatChatDashboard({ onBack }) {
 
   const extractDepthProfile = (payload) => {
     if (!payload) return [];
-    if (payload.depth_profile && payload.depth_profile.length > 0) return payload.depth_profile;
-    if (payload.trajectory_4d && payload.trajectory_4d.length > 0) {
-      return payload.trajectory_4d.map(item => ({
-        depth: item.depth,
-        temp: item.temp,
-        salinity: item.salinity
-      })).sort((a, b) => a.depth - b.depth);
-    }
-    return [];
+    const points = Array.isArray(payload.depth_profile) && payload.depth_profile.length > 0
+      ? payload.depth_profile
+      : payload.trajectory_4d ?? payload.trajectory ?? [];
+
+    if (!Array.isArray(points)) return [];
+
+    return points
+      .filter(point => point && typeof point === 'object')
+      .map(point => ({
+        depth: Number(point.depth ?? point.pressure),
+        temp: Number(point.temp ?? point.temperature),
+        salinity: Number(point.salinity ?? point.psu)
+      }))
+      .filter(point => Number.isFinite(point.depth) && Number.isFinite(point.temp))
+      .sort((a, b) => a.depth - b.depth);
   };
 
   const currentDepthProfile = extractDepthProfile(primaryPayload);
@@ -179,15 +207,12 @@ export default function FloatChatDashboard({ onBack }) {
     ]
   } : null;
 
-  const trajectoryPositions = primaryPayload ? (
-    primaryPayload.trajectory_4d 
-      ? primaryPayload.trajectory_4d.map(p => [p.lat, p.lng])
-      : (primaryPayload.trajectory ? primaryPayload.trajectory.map(p => [p.lat, p.lng]) : [])
-  ) : [];
+  const normalizedTrajectory = normalizeTrajectory(primaryPayload);
+  const trajectoryPositions = normalizedTrajectory.map(point => [point.lat, point.lng]);
 
-  const activePoint = primaryPayload?.trajectory_4d?.find(
-    pt => pt.time.includes(String(timeSlider))
-  ) || primaryPayload?.trajectory_4d?.[0] || {};
+  const activePoint = normalizedTrajectory.find(
+    point => String(point.time ?? point.timestamp ?? '').includes(String(timeSlider))
+  ) || normalizedTrajectory[0] || {};
 
   const timelineData = {
     labels: ['Jan', 'Mar', 'May', 'Jul', 'Sep', 'Nov', 'Jan (2024)', 'Mar (2024)'],
@@ -294,15 +319,7 @@ export default function FloatChatDashboard({ onBack }) {
                               </p>
                             )}
 
-                          <p className="flex justify-between">
-  <span className="text-slate-400">
-    Surface temperature:
-  </span>
-
-  <span className="font-semibold text-cyan-400">
-    {cardData?.surface_temp || "29.2°C"}
-  </span>
-</p>
+                       
 
 <p className="flex justify-between">
   <span className="text-slate-400">
@@ -310,7 +327,9 @@ export default function FloatChatDashboard({ onBack }) {
   </span>
 
   <span className="font-semibold text-sky-400">
-    {cardData?.deep_temp || "11.8°C"}
+    {cardData?.deep_temp != null
+  ? `${cardData.deep_temp} °C`
+  : 'N/A'}
   </span>
 </p>
 
@@ -320,28 +339,11 @@ export default function FloatChatDashboard({ onBack }) {
   </span>
 
   <span className="font-mono text-emerald-400">
-    {cardData?.depth_range || "0–2000m"}
+    {cardData?.depth_range || 'N/A'}
   </span>
 </p>
 
 
-
-
-                            {cardData?.deep_temp && (
-                              <p className="flex justify-between">
-                                <span className="text-slate-400">Deep ocean temp:</span>
-                                <span className="font-semibold text-sky-400">{cardData.deep_temp}</span>
-                              </p>
-                            )}
-                            <p className="flex justify-between">
-  <span className="text-slate-400">
-    Observed depth range:
-  </span>
-
-  <span className="font-mono text-emerald-400">
-    {cardData?.depth_range || "0–2000m"}
-  </span>
-</p>
                           </div>
 
                           <p className="text-xs text-slate-300 bg-slate-950/60 p-2.5 rounded-lg border border-slate-800/80 mb-4 leading-relaxed">
@@ -422,7 +424,9 @@ export default function FloatChatDashboard({ onBack }) {
               <div>
                 <span className="text-[11px] text-slate-400 uppercase font-semibold">Avg Salinity</span>
                 <h3 className="text-xl font-bold text-slate-100">
-                  {primaryPayload?.region?.includes('Arabian') ? '36.2 PSU' : '33.8 PSU'}
+                  {(primaryPayload?.average_salinity ?? primaryPayload?.salinity) != null
+  ? `${primaryPayload.average_salinity ?? primaryPayload.salinity} PSU`
+  : 'N/A'}
                 </h3>
               </div>
               <Droplets className="w-7 h-7 text-emerald-400 opacity-80" />
@@ -431,7 +435,11 @@ export default function FloatChatDashboard({ onBack }) {
             <div className="bg-slate-900 border border-slate-800 p-3 rounded-xl flex items-center justify-between border-l-4 border-l-red-500">
               <div>
                 <span className="text-[11px] text-slate-400 uppercase font-semibold">Marine Heatwave Anomaly</span>
-                <h3 className="text-xl font-bold text-red-400">+2.8 °C ⚠️</h3>
+                <h3 className="text-xl font-bold text-red-400">
+  {primaryPayload?.anomaly != null
+    ? `${primaryPayload.anomaly} °C`
+    : 'N/A'}
+</h3>
               </div>
               <Flame className="w-7 h-7 text-red-500 opacity-80 animate-pulse" />
             </div>
@@ -448,9 +456,9 @@ export default function FloatChatDashboard({ onBack }) {
               </div>
 
               <div className="flex-1 rounded-lg overflow-hidden relative z-0 h-[270px]">
-                <MapContainer center={[activePoint.lat || 16.5, activePoint.lng || 68.5]} zoom={5} className="h-full w-full">
+                <MapContainer center={[activePoint.lat ?? primaryPayload?.lat ?? 16.5, activePoint.lng ?? primaryPayload?.lng ?? 68.5]} zoom={5} className="h-full w-full">
                   <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-                  {activePoint.lat && (
+                  {Number.isFinite(activePoint.lat) && Number.isFinite(activePoint.lng) && (
                     <Marker position={[activePoint.lat, activePoint.lng]}>
                       <Popup>
                         Time: {activePoint.time}<br />
@@ -460,7 +468,7 @@ export default function FloatChatDashboard({ onBack }) {
                       </Popup>
                     </Marker>
                   )}
-                  {trajectoryPositions.length > 0 && (
+                  {trajectoryPositions.length > 1 && (
                     <Polyline positions={trajectoryPositions} color="#10b981" />
                   )}
                 </MapContainer>
@@ -589,4 +597,4 @@ export default function FloatChatDashboard({ onBack }) {
 
     </div>
   );
-}
+}//Mapdashboard.jsx

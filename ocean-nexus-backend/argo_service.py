@@ -5,10 +5,185 @@ import re
 import requests
 import numpy as np
 import xarray as xr
+import psycopg2
+
 from datetime import datetime, timedelta
 
 
-ARGO_BASE_URL = "https://usgodae.org/ftp/outgoing/argo/"
+# =========================================================
+# POSTGRESQL CONFIGURATION
+# =========================================================
+
+POSTGRES_CONFIG = {
+    "host": "localhost",
+    "port": 5432,
+    "database": "ocean_nexus_argo",
+    "user": "postgres",
+    "password": "Ridhinya@2008"
+}
+
+
+def get_postgres_connection():
+
+    return psycopg2.connect(
+        host=POSTGRES_CONFIG["host"],
+        port=POSTGRES_CONFIG["port"],
+        dbname=POSTGRES_CONFIG["database"],
+        user=POSTGRES_CONFIG["user"],
+        password=POSTGRES_CONFIG["password"]
+    )
+
+# =========================================================
+# FETCH ARGO DATA FROM POSTGRESQL
+# =========================================================
+
+def fetch_argo_from_postgres(
+    float_id=None,
+    start_date=None,
+    end_date=None,
+    max_points=500
+):
+
+    print("======================================")
+    print("FETCHING ARGO DATA FROM POSTGRESQL")
+    print("======================================")
+
+    conn = None
+    cursor = None
+
+    try:
+
+        conn = get_postgres_connection()
+        cursor = conn.cursor()
+
+        query = """
+            SELECT
+                platform_number,
+                cycle_number,
+                time,
+                latitude,
+                longitude,
+                pres_adjusted,
+                temp_adjusted,
+                psal_adjusted,
+                pres_adjusted_error
+            FROM argo_measurements
+            WHERE data_mode = 'D'
+              AND pres_adjusted_qc = 1
+              AND temp_adjusted_qc = 1
+              AND psal_adjusted_qc = 1
+              AND pres_adjusted_error < 20
+              AND temp_adjusted IS NOT NULL
+              AND psal_adjusted IS NOT NULL
+        """
+
+        params = []
+
+        if float_id:
+            query += " AND platform_number = %s"
+            params.append(int(float_id))
+
+        if start_date:
+            query += " AND time >= %s"
+            params.append(start_date)
+
+        if end_date:
+            query += " AND time <= %s"
+            params.append(end_date)
+
+        query += """
+            ORDER BY time ASC, pres_adjusted ASC
+        """
+
+        cursor.execute(query, params)
+
+        rows = cursor.fetchall()
+
+        print("PostgreSQL rows:", len(rows))
+
+        if not rows:
+            raise Exception(
+                "No valid ARGO data found in PostgreSQL"
+            )
+
+        MAX_TRAJECTORY_POINTS = max_points
+
+        if len(rows) > MAX_TRAJECTORY_POINTS:
+            step = len(rows) // MAX_TRAJECTORY_POINTS
+            rows = rows[::step][:MAX_TRAJECTORY_POINTS]
+
+        print(
+            "Rows selected for dashboard:",
+            len(rows)
+        )
+
+        trajectory = []
+
+        for row in rows:
+
+            (
+                platform_number,
+                cycle_number,
+                time,
+                latitude,
+                longitude,
+                pressure,
+                temperature,
+                salinity,
+                pressure_error
+            ) = row
+
+            trajectory.append({
+                "float_id": str(int(platform_number)),
+                "cycle_number": int(cycle_number),
+                "time": time.isoformat() if time else None,
+                "latitude": float(latitude),
+                "longitude": float(longitude),
+                "pressure": float(pressure),
+                "temperature": float(temperature),
+                "salinity": float(salinity),
+                "pressure_error": float(pressure_error),
+                "qc_pass": True
+            })
+
+        latest = trajectory[-1]
+
+        print("Latest Float ID:", latest["float_id"])
+        print("Latest Latitude:", latest["latitude"])
+        print("Latest Longitude:", latest["longitude"])
+        print("Trajectory points:", len(trajectory))
+
+        return {
+            "float_id": latest["float_id"],
+            "latitude": latest["latitude"],
+            "longitude": latest["longitude"],
+            "trajectory": trajectory,
+            "source_file": "PostgreSQL: argo_measurements",
+            "qc_summary": {
+                "total_points": len(trajectory),
+                "valid_points": len(trajectory),
+                "rejected_points": 0
+            }
+        }
+
+    except Exception as error:
+
+        print("POSTGRES ERROR:", error)
+
+        raise
+
+    finally:
+
+        if cursor:
+            cursor.close()
+
+        if conn:
+            conn.close()
+# =========================================================
+# ARGO GDAC CONFIGURATION
+# =========================================================
+
+ARGO_BASE_URL = "https://data-argo.ifremer.fr/"
 
 ARGO_PROFILE_INDEX_URL = (
     ARGO_BASE_URL + "ar_index_global_prof.txt.gz"
@@ -17,8 +192,15 @@ ARGO_PROFILE_INDEX_URL = (
 MAX_PROFILES = 10
 
 
+# =========================================================
+# DOWNLOAD ARGO GLOBAL PROFILE INDEX
+# =========================================================
+
 def download_argo_index():
-    print("Downloading ARGO profile index...")
+
+    print("======================================")
+    print("DOWNLOADING ARGO PROFILE INDEX")
+    print("======================================")
 
     response = requests.get(
         ARGO_PROFILE_INDEX_URL,
@@ -34,17 +216,24 @@ def download_argo_index():
     print("ARGO content type:", response.headers.get("content-type"))
     print("ARGO compressed size:", len(response.content))
 
-    # Decompress gzip data
     data = gzip.decompress(response.content)
 
     print("ARGO decompressed size:", len(data))
 
-    text = data.decode("utf-8", errors="replace")
+    text = data.decode(
+        "utf-8",
+        errors="replace"
+    )
 
     return text
 
 
+# =========================================================
+# FIND PROFILE FILES
+# =========================================================
+
 def find_argo_profile_files():
+
     text = download_argo_index()
 
     lines = text.splitlines()
@@ -53,20 +242,32 @@ def find_argo_profile_files():
 
     header_index = None
 
-    # Find actual CSV header
     for i, line in enumerate(lines):
 
         cleaned = line.strip()
 
-        if cleaned.startswith("file,date,latitude,longitude"):
+        if cleaned.startswith(
+            "file,date,latitude,longitude"
+        ):
+
             header_index = i
-            print("ARGO CSV header found at line:", i)
-            print("HEADER:", cleaned)
+
+            print(
+                "ARGO CSV header found at line:",
+                i
+            )
+
+            print(
+                "HEADER:",
+                cleaned
+            )
+
             break
 
     if header_index is None:
+
         raise Exception(
-            "ARGO profile index CSV header not found after gzip decompression"
+            "ARGO profile index CSV header not found"
         )
 
     headers = [
@@ -87,9 +288,15 @@ def find_argo_profile_files():
             continue
 
         try:
-            values = next(csv.reader([line]))
 
-            if len(values) <= max(file_index, date_index):
+            values = next(
+                csv.reader([line])
+            )
+
+            if len(values) <= max(
+                file_index,
+                date_index
+            ):
                 continue
 
             file_path = values[file_index].strip()
@@ -98,39 +305,50 @@ def find_argo_profile_files():
             if not file_path.endswith(".nc"):
                 continue
 
-            # Extract float ID
+            # Correct ARGO profile filename extraction
             match = re.search(
-                r"[RD](\d{7})_\d+\.nc",
+                r"([RD])(\d{7})_(\d+)\.nc$",
                 file_path
             )
 
             if not match:
                 continue
 
-            float_id = match.group(1)
+            float_id = match.group(2)
 
-            records.append({
-                "file": file_path,
-                "date": date_value,
-                "float_id": float_id
-            })
+            records.append(
+                {
+                    "file": file_path,
+                    "date": date_value,
+                    "float_id": float_id
+                }
+            )
 
         except Exception:
             continue
 
     if not records:
-        raise Exception("No ARGO profile records found")
 
-    print("Total ARGO profile records:", len(records))
+        raise Exception(
+            "No ARGO profile records found"
+        )
 
-    # Latest profile in index
+    print(
+        "Total ARGO profile records:",
+        len(records)
+    )
+
+    # Latest record
     latest_record = records[-1]
 
     float_id = latest_record["float_id"]
 
-    print("Latest float ID:", float_id)
+    print(
+        "Latest float ID:",
+        float_id
+    )
 
-    # Get profiles belonging to same float
+    # Keep profiles from same float
     same_float = [
         record
         for record in records
@@ -144,17 +362,16 @@ def find_argo_profile_files():
         len(same_float)
     )
 
-    # Sort by date
     same_float.sort(
         key=lambda x: x["date"]
     )
 
-    # Take latest profiles
     selected = same_float[-MAX_PROFILES:]
 
     print("Selected profiles:")
 
     for record in selected:
+
         print(
             record["date"],
             record["file"]
@@ -163,8 +380,14 @@ def find_argo_profile_files():
     return selected
 
 
+# =========================================================
+# SAFE FLOAT
+# =========================================================
+
 def safe_float(value):
+
     try:
+
         value = float(value)
 
         if not np.isfinite(value):
@@ -173,8 +396,13 @@ def safe_float(value):
         return value
 
     except Exception:
+
         return None
 
+
+# =========================================================
+# BUILD ARGO FILE URL
+# =========================================================
 
 def build_argo_file_url(file_path):
 
@@ -189,27 +417,47 @@ def build_argo_file_url(file_path):
     return ARGO_BASE_URL + "dac/" + file_path
 
 
+# =========================================================
+# JULD → ISO TIME
+# =========================================================
+
 def convert_juld_to_time(juld_value):
 
     try:
+
         value = float(juld_value)
 
         if not np.isfinite(value):
             return None
 
-        base_date = datetime(1950, 1, 1)
+        base_date = datetime(
+            1950,
+            1,
+            1
+        )
 
-        result = base_date + timedelta(days=value)
+        result = (
+            base_date
+            + timedelta(days=value)
+        )
 
         return result.isoformat()
 
     except Exception:
+
         return None
 
 
+# =========================================================
+# ARGO NETCDF READER
+# =========================================================
+
 def read_argo_netcdf(file_url):
 
-    print("Downloading ARGO profile:")
+    print(
+        "Downloading ARGO profile:"
+    )
+
     print(file_url)
 
     response = requests.get(
@@ -229,17 +477,24 @@ def read_argo_netcdf(file_url):
 
     try:
 
-        if "LATITUDE" not in dataset:
-            raise Exception("LATITUDE variable missing")
+        required_variables = [
+            "LATITUDE",
+            "LONGITUDE",
+            "PRES",
+            "TEMP"
+        ]
 
-        if "LONGITUDE" not in dataset:
-            raise Exception("LONGITUDE variable missing")
+        for variable in required_variables:
 
-        if "PRES" not in dataset:
-            raise Exception("PRES variable missing")
+            if variable not in dataset:
 
-        if "TEMP" not in dataset:
-            raise Exception("TEMP variable missing")
+                raise Exception(
+                    f"{variable} variable missing"
+                )
+
+        # -------------------------------------------------
+        # LOCATION
+        # -------------------------------------------------
 
         latitude = np.asarray(
             dataset["LATITUDE"].values
@@ -249,19 +504,26 @@ def read_argo_netcdf(file_url):
             dataset["LONGITUDE"].values
         ).flatten()
 
-        profile_latitude = safe_float(latitude[0])
-        profile_longitude = safe_float(longitude[0])
+        profile_latitude = safe_float(
+            latitude[0]
+        )
 
-        # --------------------------------
+        profile_longitude = safe_float(
+            longitude[0]
+        )
+
+        # -------------------------------------------------
         # FLOAT ID
-        # --------------------------------
+        # -------------------------------------------------
 
         float_id = "Unknown"
 
         if "PLATFORM_NUMBER" in dataset:
 
             platform = np.asarray(
-                dataset["PLATFORM_NUMBER"].values
+                dataset[
+                    "PLATFORM_NUMBER"
+                ].values
             ).flatten()
 
             if len(platform) > 0:
@@ -279,27 +541,28 @@ def read_argo_netcdf(file_url):
                     )
 
                 except Exception:
+
                     float_id = "Unknown"
 
-        # --------------------------------
+        # -------------------------------------------------
         # PRESSURE
-        # --------------------------------
+        # -------------------------------------------------
 
         pressure = np.asarray(
             dataset["PRES"].values
         )
 
-        # --------------------------------
+        # -------------------------------------------------
         # TEMPERATURE
-        # --------------------------------
+        # -------------------------------------------------
 
         temperature = np.asarray(
             dataset["TEMP"].values
         )
 
-        # --------------------------------
+        # -------------------------------------------------
         # SALINITY
-        # --------------------------------
+        # -------------------------------------------------
 
         if "PSAL" in dataset:
 
@@ -311,9 +574,87 @@ def read_argo_netcdf(file_url):
 
             salinity = None
 
-        # --------------------------------
+        # -------------------------------------------------
+        # ADJUSTED VARIABLES
+        # -------------------------------------------------
+
+        adjusted_pressure = None
+        adjusted_temperature = None
+        adjusted_salinity = None
+
+        if "PRES_ADJUSTED" in dataset:
+            adjusted_pressure = np.asarray(
+                dataset["PRES_ADJUSTED"].values
+            )
+
+        if "TEMP_ADJUSTED" in dataset:
+            adjusted_temperature = np.asarray(
+                dataset["TEMP_ADJUSTED"].values
+            )
+
+        if "PSAL_ADJUSTED" in dataset:
+            adjusted_salinity = np.asarray(
+                dataset["PSAL_ADJUSTED"].values
+            )
+
+        # -------------------------------------------------
+        # QC VARIABLES
+        # -------------------------------------------------
+
+        pressure_qc = None
+        temperature_qc = None
+        salinity_qc = None
+
+        if "PRES_ADJUSTED_QC" in dataset:
+            pressure_qc = np.asarray(
+                dataset[
+                    "PRES_ADJUSTED_QC"
+                ].values
+            )
+
+        if "TEMP_ADJUSTED_QC" in dataset:
+            temperature_qc = np.asarray(
+                dataset[
+                    "TEMP_ADJUSTED_QC"
+                ].values
+            )
+
+        if "PSAL_ADJUSTED_QC" in dataset:
+            salinity_qc = np.asarray(
+                dataset[
+                    "PSAL_ADJUSTED_QC"
+                ].values
+            )
+
+        # -------------------------------------------------
+        # PRESSURE ERROR
+        # -------------------------------------------------
+
+        pressure_error = None
+
+        if "PRES_ADJUSTED_ERROR" in dataset:
+
+            pressure_error = np.asarray(
+                dataset[
+                    "PRES_ADJUSTED_ERROR"
+                ].values
+            )
+
+        # -------------------------------------------------
+        # DATA MODE
+        # -------------------------------------------------
+
+        data_mode = None
+
+        if "DATA_MODE" in dataset:
+
+            data_mode = np.asarray(
+                dataset["DATA_MODE"].values
+            ).flatten()
+
+        # -------------------------------------------------
         # TIME
-        # --------------------------------
+        # -------------------------------------------------
 
         profile_times = []
 
@@ -329,9 +670,9 @@ def read_argo_netcdf(file_url):
                     convert_juld_to_time(value)
                 )
 
-        # --------------------------------
-        # CONVERT PROFILE DIMENSIONS
-        # --------------------------------
+        # -------------------------------------------------
+        # PROFILE DIMENSIONS
+        # -------------------------------------------------
 
         if pressure.ndim == 1:
 
@@ -367,7 +708,9 @@ def read_argo_netcdf(file_url):
 
             salinity_profiles = [
                 None
-            ] * len(pressure_profiles)
+            ] * len(
+                pressure_profiles
+            )
 
         elif salinity.ndim == 1:
 
@@ -384,9 +727,9 @@ def read_argo_netcdf(file_url):
                 )
             ]
 
-        # --------------------------------
+        # -------------------------------------------------
         # BUILD TRAJECTORY
-        # --------------------------------
+        # -------------------------------------------------
 
         trajectory = []
 
@@ -426,7 +769,7 @@ def read_argo_netcdf(file_url):
                     profile_salinity
                 ).flatten()
 
-            # Get profile time
+            # Profile time
 
             if (
                 profile_index
@@ -442,26 +785,65 @@ def read_argo_netcdf(file_url):
 
             else:
 
-                profile_time = (
-                    datetime.utcnow().isoformat()
-                )
+                profile_time = None
 
-            # --------------------------------
-            # EACH DEPTH LEVEL
-            # --------------------------------
+            # -------------------------------------------------
+            # DEPTH LEVELS
+            # -------------------------------------------------
 
             for level_index in range(
                 len(profile_pressure)
             ):
 
-                depth = safe_float(
+                raw_depth = safe_float(
                     profile_pressure[
                         level_index
                     ]
                 )
 
-                if depth is None:
+                if raw_depth is None:
                     continue
+
+                # ---------------------------------------------
+                # Prefer adjusted values when available
+                # ---------------------------------------------
+
+                depth = raw_depth
+
+                if (
+                    adjusted_pressure is not None
+                    and adjusted_pressure.ndim >= 1
+                ):
+
+                    try:
+
+                        if adjusted_pressure.ndim == 1:
+
+                            adjusted_depth = safe_float(
+                                adjusted_pressure[
+                                    level_index
+                                ]
+                            )
+
+                        else:
+
+                            adjusted_depth = safe_float(
+                                adjusted_pressure[
+                                    profile_index,
+                                    level_index
+                                ]
+                            )
+
+                        if adjusted_depth is not None:
+
+                            depth = adjusted_depth
+
+                    except Exception:
+                        pass
+
+                # ---------------------------------------------
+                # Temperature
+                # ---------------------------------------------
 
                 temp = None
 
@@ -476,11 +858,43 @@ def read_argo_netcdf(file_url):
                         ]
                     )
 
+                # Prefer adjusted temperature
+
+                if adjusted_temperature is not None:
+
+                    try:
+
+                        if adjusted_temperature.ndim == 1:
+
+                            adjusted_temp = safe_float(
+                                adjusted_temperature[
+                                    level_index
+                                ]
+                            )
+
+                        else:
+
+                            adjusted_temp = safe_float(
+                                adjusted_temperature[
+                                    profile_index,
+                                    level_index
+                                ]
+                            )
+
+                        if adjusted_temp is not None:
+                            temp = adjusted_temp
+
+                    except Exception:
+                        pass
+
+                # ---------------------------------------------
+                # Salinity
+                # ---------------------------------------------
+
                 salt = None
 
                 if (
-                    profile_salinity
-                    is not None
+                    profile_salinity is not None
                     and level_index
                     < len(profile_salinity)
                 ):
@@ -491,6 +905,127 @@ def read_argo_netcdf(file_url):
                         ]
                     )
 
+                # Prefer adjusted salinity
+
+                if adjusted_salinity is not None:
+
+                    try:
+
+                        if adjusted_salinity.ndim == 1:
+
+                            adjusted_salt = safe_float(
+                                adjusted_salinity[
+                                    level_index
+                                ]
+                            )
+
+                        else:
+
+                            adjusted_salt = safe_float(
+                                adjusted_salinity[
+                                    profile_index,
+                                    level_index
+                                ]
+                            )
+
+                        if adjusted_salt is not None:
+                            salt = adjusted_salt
+
+                    except Exception:
+                        pass
+
+                # ---------------------------------------------
+                # QC
+                # ---------------------------------------------
+
+                qc_values = []
+
+                for qc_array in [
+                    pressure_qc,
+                    temperature_qc,
+                    salinity_qc
+                ]:
+
+                    if qc_array is None:
+                        continue
+
+                    try:
+
+                        if qc_array.ndim == 1:
+
+                            qc_value = qc_array[
+                                level_index
+                            ]
+
+                        else:
+
+                            qc_value = qc_array[
+                                profile_index,
+                                level_index
+                            ]
+
+                        qc_values.append(
+                            str(qc_value)
+                        )
+
+                    except Exception:
+                        pass
+
+                # ---------------------------------------------
+                # Pressure error
+                # ---------------------------------------------
+
+                pressure_error_value = None
+
+                if pressure_error is not None:
+
+                    try:
+
+                        if pressure_error.ndim == 1:
+
+                            pressure_error_value = safe_float(
+                                pressure_error[
+                                    level_index
+                                ]
+                            )
+
+                        else:
+
+                            pressure_error_value = safe_float(
+                                pressure_error[
+                                    profile_index,
+                                    level_index
+                                ]
+                            )
+
+                    except Exception:
+                        pass
+
+                # ---------------------------------------------
+                # QC eligibility
+                # ---------------------------------------------
+
+                qc_pass = True
+
+                if qc_values:
+
+                    qc_pass = all(
+                        q == "1"
+                        for q in qc_values
+                        if q not in [
+                            "nan",
+                            "None",
+                            ""
+                        ]
+                    )
+
+                if (
+                    pressure_error_value is not None
+                    and pressure_error_value >= 20
+                ):
+
+                    qc_pass = False
+
                 trajectory.append(
                     {
                         "time": profile_time,
@@ -498,7 +1033,9 @@ def read_argo_netcdf(file_url):
                         "lng": profile_longitude,
                         "depth": depth,
                         "temp": temp,
-                        "salinity": salt
+                        "salinity": salt,
+                        "qc_pass": qc_pass,
+                        "pressure_error": pressure_error_value
                     }
                 )
 
@@ -515,27 +1052,38 @@ def read_argo_netcdf(file_url):
         dataset.close()
 
 
-def fetch_real_argo_data():
+# =========================================================
+# FETCH REAL ARGO DATA
+# =========================================================
+
+def fetch_real_argo_data(
+    float_id=None,
+    start_date=None,
+    end_date=None
+):
 
     print("======================================")
     print("FETCHING REAL ARGO DATA")
     print("======================================")
 
-    selected_profiles = find_argo_profile_files()
-
+    return fetch_argo_from_postgres(
+        float_id=float_id,
+        start_date=start_date,
+        end_date=end_date,
+        max_points=500
+    )
     all_trajectory = []
 
     float_id = "Unknown"
 
     latest_latitude = None
-
     latest_longitude = None
 
     source_file = None
 
-    # --------------------------------
-    # READ SELECTED PROFILES
-    # --------------------------------
+    # -----------------------------------------------------
+    # READ PROFILES
+    # -----------------------------------------------------
 
     for record in selected_profiles:
 
@@ -568,7 +1116,9 @@ def fetch_real_argo_data():
             ]
 
             all_trajectory.extend(
-                profile_data["trajectory"]
+                profile_data[
+                    "trajectory"
+                ]
             )
 
         except Exception as error:
@@ -585,27 +1135,44 @@ def fetch_real_argo_data():
 
             continue
 
-    # --------------------------------
-    # CHECK DATA
-    # --------------------------------
-
     if not all_trajectory:
 
         raise Exception(
             "Could not read any ARGO profile data"
         )
 
-    # --------------------------------
-    # SORT BY TIME
-    # --------------------------------
+    # -----------------------------------------------------
+    # SORT
+    # -----------------------------------------------------
 
     all_trajectory.sort(
         key=lambda point:
         point.get("time") or ""
     )
 
+    # -----------------------------------------------------
+    # QC SUMMARY
+    # -----------------------------------------------------
+
+    total_points = len(
+        all_trajectory
+    )
+
+    valid_points = sum(
+        1
+        for point in all_trajectory
+        if point.get("qc_pass", True)
+    )
+
+    rejected_points = (
+        total_points
+        - valid_points
+    )
+
     print("======================================")
     print("ARGO DATA SUCCESS")
+    print("======================================")
+
     print(
         "Float ID:",
         float_id
@@ -622,8 +1189,18 @@ def fetch_real_argo_data():
     )
 
     print(
-        "Trajectory points:",
-        len(all_trajectory)
+        "Total points:",
+        total_points
+    )
+
+    print(
+        "QC valid points:",
+        valid_points
+    )
+
+    print(
+        "QC rejected points:",
+        rejected_points
     )
 
     print("======================================")
@@ -633,5 +1210,10 @@ def fetch_real_argo_data():
         "latitude": latest_latitude,
         "longitude": latest_longitude,
         "trajectory": all_trajectory,
-        "source_file": source_file
+        "source_file": source_file,
+        "qc_summary": {
+            "total_points": total_points,
+            "valid_points": valid_points,
+            "rejected_points": rejected_points
+        }
     }
